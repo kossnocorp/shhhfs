@@ -1,0 +1,18 @@
+experimental_monorepo_root = true
+[monorepo]
+config_roots = ["pkgs/*"]
+
+[tools]
+# Stack
+rust = { version = "latest", channel = "stable", components = "rustfmt,clippy" }
+
+# Tools
+oxfmt = "latest"
+watchexec = "latest"
+
+[settings]
+lockfile = true
+experimental = true
+
+[env]
+MISE_EXPERIMENTAL = true # Enable monorepo root support
