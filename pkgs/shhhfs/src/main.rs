@@ -11,7 +11,7 @@ async fn main() {
         Ok(_) => {}
         Err(err) => {
             UiMessage::error(err);
-            exit(1);
+            process::exit(1);
         }
     }
 }

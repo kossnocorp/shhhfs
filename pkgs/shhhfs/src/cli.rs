@@ -1,8 +1,8 @@
 use crate::prelude::*;
 
 #[derive(Parser)]
-#[command(name = "sherloc")]
-#[command(about = "Semantic LOC counter", long_about = None)]
+#[command(name = "shhhfs")]
+#[command(about = "Virtual file system for secrets", long_about = None)]
 #[command(arg_required_else_help = true)]
 pub struct Cli {
     /// Set current directory for the command
