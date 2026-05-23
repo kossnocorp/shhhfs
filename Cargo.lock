@@ -682,6 +682,7 @@ dependencies = [
  "indicatif",
  "insta",
  "libc",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

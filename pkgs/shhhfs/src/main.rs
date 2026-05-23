@@ -3,6 +3,7 @@ use prelude::*;
 mod cli;
 mod command;
 mod prelude;
+mod provider;
 mod ui;
 
 #[tokio::main]

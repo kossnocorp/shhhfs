@@ -1,8 +1,6 @@
 use crate::prelude::*;
 
-const FILE_NAME: &str = "age.txt";
-const FILE_CONTENTS: &[u8] = b"Hello, world!\n";
-const FILE_INO: fuser::INodeNo = fuser::INodeNo(2);
+const FIRST_FILE_INO: u64 = 2;
 const TTL: Duration = Duration::from_secs(1);
 
 #[derive(Error, Debug)]
@@ -21,12 +19,22 @@ pub enum MountError {
 pub struct MountArgs {
     /// Directory where the virtual file system should be mounted
     pub path: PathBuf,
+
+    /// Secrets provider to use
+    #[arg(long, default_value = "json")]
+    pub provider: String,
+
+    /// Provider-specific options string
+    #[arg(long, value_name = "PROVIDER_OPTIONS")]
+    pub provider_opts: Option<String>,
 }
 
 pub struct MountCmd {}
 
 impl MountCmd {
     pub async fn run<'a>(_cli: &'a Cli, args: &'a MountArgs) -> Result<(), MountError> {
+        let provider = provider_from_args(args)?;
+
         tokio::fs::create_dir_all(&args.path).await?;
 
         UiMessage::info(&format!(
@@ -35,7 +43,7 @@ impl MountCmd {
             args.path.display()
         ));
 
-        let fs = ShhhFs::new();
+        let fs = ShhhFs::new(provider);
 
         let mut config = fuser::Config::default();
         config.mount_options = vec![
@@ -63,6 +71,20 @@ impl MountCmd {
         }
 
         Ok(())
+    }
+}
+
+fn provider_from_args(args: &MountArgs) -> Result<Box<dyn ShhhFsProvider + Send + Sync>> {
+    match args.provider.as_str() {
+        "json" => {
+            let options = args
+                .provider_opts
+                .as_deref()
+                .ok_or_else(|| anyhow!("json provider requires --provider-opts"))?;
+            Ok(Box::new(JsonShhhProvider::from_options(options)?))
+        }
+
+        provider => Err(anyhow!("unknown provider {:?}", provider)),
     }
 }
 
@@ -94,14 +116,16 @@ async fn shutdown_signal() -> std::io::Result<()> {
 }
 
 struct ShhhFs {
+    provider: Box<dyn ShhhFsProvider + Send + Sync>,
     uid: u32,
     gid: u32,
     created_at: SystemTime,
 }
 
 impl ShhhFs {
-    fn new() -> Self {
+    fn new(provider: Box<dyn ShhhFsProvider + Send + Sync>) -> Self {
         Self {
+            provider,
             uid: unsafe { libc::geteuid() },
             gid: unsafe { libc::getegid() },
             created_at: SystemTime::now(),
@@ -128,10 +152,22 @@ impl ShhhFs {
         }
     }
 
-    fn file_attr(&self) -> fuser::FileAttr {
+    fn file_ino(index: usize) -> fuser::INodeNo {
+        fuser::INodeNo(FIRST_FILE_INO + index as u64)
+    }
+
+    fn entry_by_ino(&self, ino: fuser::INodeNo) -> Option<(usize, &ShhhFsEntry)> {
+        self.provider
+            .entries()
+            .iter()
+            .enumerate()
+            .find(|(index, _entry)| Self::file_ino(*index) == ino)
+    }
+
+    fn file_attr(&self, ino: fuser::INodeNo, entry: &ShhhFsEntry) -> fuser::FileAttr {
         fuser::FileAttr {
-            ino: FILE_INO,
-            size: FILE_CONTENTS.len() as u64,
+            ino,
+            size: entry.contents.len() as u64,
             blocks: 1,
             atime: self.created_at,
             mtime: self.created_at,
@@ -157,11 +193,20 @@ impl fuser::Filesystem for ShhhFs {
         name: &ffi::OsStr,
         reply: fuser::ReplyEntry,
     ) {
-        if parent == fuser::INodeNo::ROOT && name == FILE_NAME {
-            reply.entry(&TTL, &self.file_attr(), fuser::Generation(0));
-        } else {
+        if parent != fuser::INodeNo::ROOT {
             reply.error(fuser::Errno::ENOENT);
+            return;
         }
+
+        for (index, entry) in self.provider.entries().iter().enumerate() {
+            if name == entry.name.as_str() {
+                let ino = Self::file_ino(index);
+                reply.entry(&TTL, &self.file_attr(ino, entry), fuser::Generation(0));
+                return;
+            }
+        }
+
+        reply.error(fuser::Errno::ENOENT);
     }
 
     fn getattr(
@@ -174,9 +219,13 @@ impl fuser::Filesystem for ShhhFs {
         match ino {
             fuser::INodeNo::ROOT => reply.attr(&TTL, &self.root_attr()),
 
-            FILE_INO => reply.attr(&TTL, &self.file_attr()),
-
-            _ => reply.error(fuser::Errno::ENOENT),
+            ino => {
+                if let Some((_index, entry)) = self.entry_by_ino(ino) {
+                    reply.attr(&TTL, &self.file_attr(ino, entry));
+                } else {
+                    reply.error(fuser::Errno::ENOENT);
+                }
+            }
         }
     }
 
@@ -187,7 +236,7 @@ impl fuser::Filesystem for ShhhFs {
         _flags: fuser::OpenFlags,
         reply: fuser::ReplyOpen,
     ) {
-        if ino == FILE_INO {
+        if self.entry_by_ino(ino).is_some() {
             reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
         } else {
             reply.error(fuser::Errno::ENOENT);
@@ -205,14 +254,14 @@ impl fuser::Filesystem for ShhhFs {
         _lock_owner: Option<fuser::LockOwner>,
         reply: fuser::ReplyData,
     ) {
-        if ino != FILE_INO {
+        let Some((_index, entry)) = self.entry_by_ino(ino) else {
             reply.error(fuser::Errno::ENOENT);
             return;
-        }
+        };
 
         let offset = offset as usize;
         let size = size as usize;
-        let data = FILE_CONTENTS.get(offset..).unwrap_or_default();
+        let data = entry.contents.get(offset..).unwrap_or_default();
         let end = data.len().min(size);
         reply.data(&data[..end]);
     }
@@ -230,16 +279,41 @@ impl fuser::Filesystem for ShhhFs {
             return;
         }
 
-        let entries = [
-            (fuser::INodeNo::ROOT, fuser::FileType::Directory, "."),
-            (fuser::INodeNo::ROOT, fuser::FileType::Directory, ".."),
-            (FILE_INO, fuser::FileType::RegularFile, FILE_NAME),
+        let dot_entries = [
+            (
+                fuser::INodeNo::ROOT,
+                fuser::FileType::Directory,
+                ffi::OsStr::new("."),
+            ),
+            (
+                fuser::INodeNo::ROOT,
+                fuser::FileType::Directory,
+                ffi::OsStr::new(".."),
+            ),
         ];
 
-        for (index, entry) in entries.iter().enumerate().skip(offset as usize) {
+        let mut full = false;
+
+        for (index, entry) in dot_entries.iter().enumerate().skip(offset as usize) {
             let next_offset = (index + 1) as u64;
             if reply.add(entry.0, next_offset, entry.1, entry.2) {
+                full = true;
                 break;
+            }
+        }
+
+        if !full {
+            let file_offset = offset.saturating_sub(dot_entries.len() as u64) as usize;
+            for (index, entry) in self.provider.entries().iter().enumerate().skip(file_offset) {
+                let next_offset = (dot_entries.len() + index + 1) as u64;
+                if reply.add(
+                    Self::file_ino(index),
+                    next_offset,
+                    fuser::FileType::RegularFile,
+                    entry.name.as_str(),
+                ) {
+                    break;
+                }
             }
         }
 
