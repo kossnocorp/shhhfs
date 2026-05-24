@@ -36,8 +36,32 @@ shhhfs relies on [macFUSE](https://osxfuse.github.io/) to create a virtual file 
 brew install pkgconf macfuse
 ```
 
+> See [macFUSE's Getting Started](https://github.com/macfuse/macfuse/wiki/Getting-Started) for more details on how to install and set up macFUSE.
+
 Then install shhhfs using Cargo:
 
 ```bash
 cargo install shhhfs
+```
+
+## Usage
+
+### Example
+
+To see shhhfs in action, you can use the `json` provider, which simply uses a JSON object as the source for the virtual file system. **Use it only for testing, as it doesn't provide any security.**
+
+Run `shhhfs` with the `mount` command:
+
+```bash
+shhhfs mount --provider json --provider-opts '{"hello.txt": "Hello, cruel world!"}' ~/.shhfs
+```
+
+Then you can access the `hello.txt` file in the `~/.shhfs` directory:
+
+```bash
+ls ~/.shhfs
+#=> hello.txt
+
+cat ~/.shhfs/hello.txt
+#=> Hello, cruel world!
 ```
